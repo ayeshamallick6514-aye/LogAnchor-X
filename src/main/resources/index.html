@@ -131,6 +131,7 @@
   .chip:hover{color:var(--bright);border-color:var(--accent);background:var(--accent-dim)}
 
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+   .field-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
   button.btn{
     appearance:none;cursor:pointer;font-family:var(--sans);font-size:12px;font-weight:550;
     padding:8px 14px;border-radius:5px;border:1px solid transparent;
@@ -166,6 +167,7 @@
   table.data tbody tr.pick:hover{background:var(--surface-2)}
   table.data tbody tr.sel{background:var(--accent-dim);box-shadow:inset 2px 0 0 var(--accent)}
   td.mono,th.mono{font-family:var(--mono)}
+.mono{font-family:var(--mono)}
   .scroll-y{max-height:300px;overflow-y:auto}
 
   .pill{
@@ -200,12 +202,19 @@
   .gnode{cursor:pointer}
   .gnode circle.body{stroke:var(--bg);stroke-width:2}
   .gnode:hover circle.body{stroke:var(--bright)}
-  .gnode text{font-family:var(--mono);font-size:9px;fill:var(--dim);pointer-events:none;user-select:none}
-  .gnode.sel circle.ring{fill:none;stroke:var(--accent);stroke-width:1.5}
-  .gedge{stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:3 3}
-  .gedge.high{stroke:var(--accent);stroke-width:1.6;stroke-dasharray:none;opacity:.75}
+  .gnode.selected circle.body{stroke:var(--accent);stroke-width:2.5}
+.gnode text{font-family:var(--mono);font-size:9px;fill:var(--dim);pointer-events:none;user-select:none}
+.gedge{stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:3 3}
+.gedge.high{stroke:var(--accent);stroke-width:1.6;stroke-dasharray:none;opacity:.75}
+.link{stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:3 3}
+.link.high{stroke:var(--accent);stroke-width:1.6;stroke-dasharray:none;opacity:.75}
+.node circle{stroke:var(--bg);stroke-width:2;cursor:pointer}
+.node circle:hover{stroke:var(--bright)}
+.node text{font-family:var(--mono);font-size:9px;fill:var(--dim);pointer-events:none;user-select:none}
+.node.selected circle{stroke:var(--accent);stroke-width:1.5}
+.node.selected circle.ring{fill:none;stroke:var(--accent);stroke-width:1.5}
 
-  /* ---------- matrix ---------- */
+/* ---------- matrix ---------- */
   .matrix{display:flex;overflow-x:auto;background:var(--surface)}
   .mcol{flex:1 0 132px;border-right:1px solid var(--border);display:flex;flex-direction:column}
   .mcol:last-child{border-right:0}
@@ -296,6 +305,33 @@
               <button class="btn btn-default" id="btnSeal" type="button">Seal batch</button>
             </div>
             <p class="hint">Events queue into the open batch, which seals automatically at 50 events or on demand. Ctrl+Enter submits.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Import file</span><span class="card-note">CSV, JSON, CEF, LEEF, syslog</span></div>
+          <div class="card-body">
+            <div class="field-row">
+              <input type="file" id="fileInput" accept=".csv,.json,.txt,.log" style="display:none">
+              <button class="btn btn-default" id="btnFileUpload" type="button">Choose file</button>
+              <span id="fileName" class="mono" style="margin-left:10px;color:var(--dim)">-</span>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <button class="btn btn-primary grow" id="btnImport" type="button">Import file</button>
+            </div>
+            <div id="importProgress" style="display:none;margin-top:10px">
+              <div class="field-label">Import progress</div>
+              <div style="background:var(--surface-2);height:8px;border-radius:4px;overflow:hidden;margin:4px 0">
+                <div id="progressBar" style="background:var(--accent);height:100%;width:0;transition:width 0.2s ease;"></div>
+              </div>
+              <div class="row" style="font-size:11px;color:var(--dim)">
+                <span id="progressStatus">Starting...</span>
+                <span id="progressDetails" class="mono"></span>
+                <button class="btn btn-sm btn-danger" id="btnCancelImport" type="button" style="margin-left:auto;display:none">Cancel</button>
+              </div>
+            </div>
+            <div id="importStatus" class="toast" style="display:none;margin-top:8px"></div>
+            <p class="hint">Upload a structured log file to batch import. Progress shows lines processed.</p>
           </div>
         </div>
 
@@ -462,8 +498,9 @@
 
 <div id="toasts" aria-live="polite"></div>
 
+<script src="/js/d3.min.js"></script>
 <script>
-"use strict";
+ "use strict";
 
 /* ============================================================
    Constants
@@ -477,6 +514,12 @@ var SAMPLES = [
   { label: "JSON", text: '{"timestamp":"2026-09-10T14:03:00Z","src":"10.0.0.77","service":"sudo","action":"root_attempt"}' },
   { label: "XML", text: "<event><src>10.0.0.77</src><dst>203.0.113.10</dst><bytes>1048576</bytes><type>EXFIL</type></event>" },
   { label: "CSV", text: "10.0.0.77,10.0.0.1,443,TCP,ALLOW,FLOW_RECORD" },
+  { label: "HDFS block alloc", text: "2026-09-15 10:23:45,123 INFO dfs.FSNamesystem: allocate blk_-1073741829_1001 /user/hadoop/data/file1" },
+  { label: "HDFS block receive", text: "2026-09-15 10:24:12,456 INFO dfs.DataNode: Received blk_-1073741829_1001 from 192.168.1.50:50010" },
+  { label: "HDFS block delete", text: "2026-09-15 10:25:30,789 INFO dfs.FSNamesystem: delete blk_-1073741830_1002 /user/hadoop/data/old_file" },
+  { label: "HDFS block replicate", text: "2026-09-15 10:26:15,234 INFO dfs.NameNode: replicate blk_-1073741831_1003 to 192.168.1.51,192.168.1.52" },
+  { label: "HDFS corrupt block", text: "2026-09-15 10:27:00,567 ERROR dfs.DataNode: Block blk_-1073741832_1004 is corrupt on 192.168.1.53" },
+  { label: "HDFS access denied", text: "2026-09-15 10:28:22,890 WARN dfs.FSNamesystem: Access denied for user hdfs on /user/hadoop/secure" },
   { label: "Full kill chain", text: [
       "Sep 10 14:00:01 edge-fw CEF:0|NetSec|Firewall|1.0|100|PORT_SCAN|Low|src=10.0.0.77 dst=192.168.1.1 proto=TCP dpt=22 flags=SYN",
       "Sep 10 14:00:15 auth-gw sshd[4011]: Failed password for invalid user admin from 10.0.0.77 port 41201 ssh2",
@@ -746,177 +789,247 @@ function selectLeaf(leaf, opts) {
   state.activeLeaf = leaf;
   $("leafInput").value = leaf;
   renderEventsTable();
-  drawGraph();
   var node = state.nodes.filter(function (n) { return n.leafHash === leaf; })[0];
   if (node) renderNodeDetail(node);
+  highlightSelectedNode();
   if (opts && opts.goto) showView(opts.goto);
 }
 
 /* ============================================================
-   Provenance graph - self-contained force layout, no CDN
+   D3.js Provenance Graph - force-directed graph with drag
    ============================================================ */
 var PAD = 26;
-var REPULSION = 5200, LINK_LEN = 96, SPRING = 0.035, CENTER = 0.012, DAMP = 0.82;
-var gfx = { nodes: [], edges: [], anim: null, alpha: 0, drag: null, moved: false, w: 0, h: 0 };
+var graphSvg = d3.select("#graphSvg");
+var d3Graph = graphSvg.append("g").attr("transform", "translate(" + PAD + "," + PAD + ")");
+var linkGroup = d3Graph.append("g").attr("class", "links");
+var nodeGroup = d3Graph.append("g").attr("class", "nodes");
+var link = linkGroup.selectAll("line");
+var node = nodeGroup.selectAll(".gnode");
+var graphTopology = "";
+var graphSize = "";
+var graphWidth = 0;
+var graphHeight = 0;
+var NODE_RADIUS = 10;
+
+var simulation = d3.forceSimulation()
+    .force("charge", d3.forceManyBody().strength(-420))
+    .force("link", d3.forceLink().id(function (d) { return d.id; }).distance(110))
+    .force("center", d3.forceCenter(0, 0))
+    .force("x", d3.forceX(0).strength(0.08))
+    .force("y", d3.forceY(0).strength(0.08))
+    .force("collide", d3.forceCollide(28))
+    .on("tick", ticked)
+    .stop();
+
+function edgeKey(d) {
+  var s = d.source && d.source.id ? d.source.id : d.source;
+  var t = d.target && d.target.id ? d.target.id : d.target;
+  return s + "-" + t;
+}
+
+function loadGraph(forceLayout) {
+  return get("/api/provenance-graph?t=" + Date.now()).then(function (d) {
+    var positions = new Map();
+    state.nodes.forEach(function (n) {
+      if (Number.isFinite(n.x) && Number.isFinite(n.y)) {
+        positions.set(n.id, { x: n.x, y: n.y });
+      }
+    });
+
+    var nextNodes = d.nodes || [];
+    var nextEdges = d.edges || [];
+    var nextTopology = nextNodes.map(function (n) { return n.id; }).sort().join("|") + "::" +
+      nextEdges.map(edgeKey).sort().join("|");
+    var topologyChanged = nextTopology !== graphTopology;
+
+    nextNodes.forEach(function (n) {
+      var position = positions.get(n.id);
+      if (position) {
+        n.x = position.x;
+        n.y = position.y;
+      }
+    });
+
+    state.nodes = nextNodes;
+    state.edges = nextEdges;
+    graphTopology = nextTopology;
+
+    $("tabGraphN").textContent = String(state.nodes.length);
+    $("graphStat").textContent = state.nodes.length
+      ? (state.nodes.length + " nodes · " + state.edges.length + " edges")
+      : "no events";
+    renderEventsTable();
+
+    if (state.nodes.length === 0) {
+      nodeGroup.selectAll("*").remove();
+      linkGroup.selectAll("*").remove();
+      link = linkGroup.selectAll("line");
+      node = nodeGroup.selectAll(".gnode");
+      simulation.nodes([]);
+      simulation.force("link").links([]);
+      simulation.stop();
+      var emptyMsg = $("graphEmpty");
+      if (!emptyMsg) {
+        emptyMsg = document.createElement("p");
+        emptyMsg.id = "graphEmpty";
+        emptyMsg.className = "empty";
+        emptyMsg.style.position = "absolute";
+        emptyMsg.style.top = "50%";
+        emptyMsg.style.left = "50%";
+        emptyMsg.style.transform = "translate(-50%,-50%)";
+        emptyMsg.style.margin = "0";
+        $("graphWrap").appendChild(emptyMsg);
+      }
+      emptyMsg.style.display = "block";
+      emptyMsg.textContent = "No events ingested. Submit events to see the provenance graph.";
+      return;
+    }
+
+    var emptyMsg = $("graphEmpty");
+    if (emptyMsg) emptyMsg.style.display = "none";
+
+    link = linkGroup.selectAll("line").data(state.edges, edgeKey);
+    link.exit().remove();
+    link = link.enter()
+        .append("line")
+      .merge(link)
+        .attr("class", function (d) {
+          return d.confidence === "HIGH (Kill-Chain Verified)" ? "link high" : "link";
+        });
+
+    node = nodeGroup.selectAll(".gnode").data(state.nodes, function (d) { return d.id; });
+    node.exit().remove();
+
+    var entered = node.enter()
+        .append("g")
+        .attr("class", "gnode")
+        .on("click", function (event, d) {
+          event.stopPropagation();
+          selectLeaf(d.leafHash);
+        });
+
+    entered.append("circle")
+        .attr("class", "body")
+      .attr("r", NODE_RADIUS);
+
+    entered.append("text")
+        .attr("class", "label")
+        .attr("dx", 14)
+        .attr("dy", 4);
+
+    node = entered.merge(node)
+        .attr("data-leaf", function (d) { return d.leafHash; });
+
+    node.select("circle.body")
+        .attr("fill", function (d) { return stageOf(d.stage).c; });
+
+    node.select("text.label")
+        .text(function (d) { return d.id; });
+
+    node.call(d3.drag()
+      .on("start", function (event, d) {
+        if (!event.active) simulation.alphaTarget(0.25).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+        d3.select(this).raise().classed("dragging", true);
+      })
+      .on("drag", function (event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", function (event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+        d3.select(this).classed("dragging", false);
+      })
+    );
+
+    resizeD3Graph(false);
+    state.nodes.forEach(function (n) {
+      if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) {
+        n.x = graphWidth / 2;
+        n.y = graphHeight / 2;
+      }
+    });
+    simulation.nodes(state.nodes);
+    simulation.force("link").links(state.edges);
+    if (forceLayout || topologyChanged) simulation.alpha(0.7).restart();
+    highlightSelectedNode();
+  });
+}
+
+function ticked() {
+  if (graphWidth <= 0 || graphHeight <= 0) return;
+  var maxX = Math.max(NODE_RADIUS, graphWidth - NODE_RADIUS);
+  var maxY = Math.max(NODE_RADIUS, graphHeight - NODE_RADIUS);
+  if (node) {
+    node.each(function (d) {
+      d.x = Math.max(NODE_RADIUS, Math.min(maxX, d.x || 0));
+      d.y = Math.max(NODE_RADIUS, Math.min(maxY, d.y || 0));
+    });
+  }
+  if (link) {
+    link
+        .attr("x1", function (d) { return d.source.x; })
+        .attr("y1", function (d) { return d.source.y; })
+        .attr("x2", function (d) { return d.target.x; })
+        .attr("y2", function (d) { return d.target.y; });
+  }
+  if (node) {
+    node.attr("transform", function (d) {
+      return "translate(" + (d.x || 0) + "," + (d.y || 0) + ")";
+    });
+  }
+}
+
+function highlightSelectedNode() {
+  nodeGroup.selectAll(".gnode").classed("selected", function (d) {
+    return !!(state.activeLeaf && d && d.leafHash === state.activeLeaf);
+  });
+}
 
 function renderLegend() {
-  $("graphLegend").innerHTML = [1, 3, 4, 5, 6, 0].map(function (s) {
-    var st = stageOf(s);
-    return '<div class="lr"><i class="dot" style="background:' + st.c + '"></i>' + esc(st.n) + "</div>";
-  }).join("");
+  var html = '<div class="lr"><span class="dot" style="background:#64748b"></span> Unclassified</div>';
+  html += '<div class="lr"><span class="dot" style="background:#4c8dff"></span> Reconnaissance</div>';
+  html += '<div class="lr"><span class="dot" style="background:#38bdf8"></span> Initial Access</div>';
+  html += '<div class="lr"><span class="dot" style="background:#d9a441"></span> Credential Access</div>';
+  html += '<div class="lr"><span class="dot" style="background:#a678f0"></span> Privilege Escalation</div>';
+  html += '<div class="lr"><span class="dot" style="background:#f0883e"></span> Lateral Movement</div>';
+  html += '<div class="lr"><span class="dot" style="background:#e5534b"></span> Exfiltration</div>';
+  html += '<div class="lr"><span class="dot" style="background:#ff5c8a"></span> Impact</div>';
+  html += '<div class="lr" style="flex-direction:column;align-items:flex-start"><span style="color:var(--dim);font-size:10px">Edge confidence</span><span style="color:var(--accent);font-size:10px">solid</span> <span style="color:var(--dim);font-size:10px">dotted</span></div>';
+  $("graphLegend").innerHTML = html;
 }
 
-function loadGraph() {
-  return get("/api/provenance-graph?t=" + Date.now()).then(function (d) {
-    state.nodes = d.nodes || [];
-    state.edges = d.edges || [];
-    $("tabGraphN").textContent = state.nodes.length;
-    $("graphStat").textContent = state.nodes.length + " events · " + state.edges.length + " correlations";
-    renderEventsTable();
-    syncGraph();
-  });
+function relayout() {
+  renderLegend();
+  resizeD3Graph();
 }
 
-/* Merge fresh server data into the layout, preserving the positions of nodes
-   we already know so the graph does not jump on every poll. */
-function syncGraph() {
-  var prev = {};
-  gfx.nodes.forEach(function (n) { prev[n.id] = n; });
-
-  gfx.nodes = state.nodes.map(function (n) {
-    var p = prev[n.id];
-    return {
-      id: n.id, data: n, stage: n.stage,
-      x: p ? p.x : null, y: p ? p.y : null,
-      vx: 0, vy: 0, fixed: false
-    };
-  });
-
-  var byId = {};
-  gfx.nodes.forEach(function (n) { byId[n.id] = n; });
-
-  gfx.edges = state.edges.map(function (e) {
-    return { s: byId[e.source], t: byId[e.target], high: /HIGH/.test(e.confidence || "") };
-  }).filter(function (e) { return e.s && e.t; });
-
-  /* Only re-energise the simulation when the node set actually changed;
-     otherwise a settled graph would jitter on every poll. */
-  var changed = gfx.nodes.length !== Object.keys(prev).length ||
-                gfx.nodes.some(function (n) { return n.x == null; });
-  relayout(changed);
-}
-
-function relayout(kick) {
+function resizeD3Graph(restart) {
   var wrap = $("graphWrap");
   if (!wrap) return;
-  gfx.w = wrap.clientWidth || 800;
-  gfx.h = wrap.clientHeight || 520;
-
-  var n = Math.max(1, gfx.nodes.length);
-  gfx.nodes.forEach(function (node, i) {
-    if (node.x == null || !isFinite(node.x)) {
-      var a = (i / n) * Math.PI * 2;
-      var r = Math.min(gfx.w, gfx.h) * 0.32;
-      node.x = gfx.w / 2 + Math.cos(a) * r + (Math.random() - 0.5) * 30;
-      node.y = gfx.h / 2 + Math.sin(a) * r + (Math.random() - 0.5) * 30;
-    }
-  });
-
-  if (kick === false && gfx.alpha <= 0.02) return;
-
-  gfx.alpha = 1;
-  if (!gfx.anim) gfx.anim = requestAnimationFrame(step);
-}
-
-function tick() {
-  var ns = gfx.nodes, i, j, a, b, dx, dy, d2, d, f, rx, ry;
-
-  for (i = 0; i < ns.length; i++) {
-    a = ns[i];
-    for (j = i + 1; j < ns.length; j++) {
-      b = ns[j];
-      dx = b.x - a.x; dy = b.y - a.y;
-      d2 = dx * dx + dy * dy;
-      if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-      if (d2 > 90000) continue;                 /* ignore distant pairs */
-      d = Math.sqrt(d2);
-      f = REPULSION / d2;
-      rx = (dx / d) * f; ry = (dy / d) * f;
-      a.vx -= rx; a.vy -= ry;
-      b.vx += rx; b.vy += ry;
-    }
-  }
-
-  gfx.edges.forEach(function (e) {
-    var ex = e.t.x - e.s.x, ey = e.t.y - e.s.y;
-    var ed = Math.sqrt(ex * ex + ey * ey) || 0.01;
-    var ef = (ed - LINK_LEN) * SPRING;
-    var sx = (ex / ed) * ef, sy = (ey / ed) * ef;
-    e.s.vx += sx; e.s.vy += sy;
-    e.t.vx -= sx; e.t.vy -= sy;
-  });
-
-  for (i = 0; i < ns.length; i++) {
-    a = ns[i];
-    if (a.fixed) { a.vx = 0; a.vy = 0; continue; }
-    a.vx += (gfx.w / 2 - a.x) * CENTER;
-    a.vy += (gfx.h / 2 - a.y) * CENTER;
-    a.vx *= DAMP; a.vy *= DAMP;
-    a.x += a.vx * gfx.alpha;
-    a.y += a.vy * gfx.alpha;
-    a.x = Math.max(PAD, Math.min(gfx.w - PAD, a.x));
-    a.y = Math.max(PAD, Math.min(gfx.h - PAD, a.y));
-  }
-}
-
-function step() {
-  tick();
-  drawGraph();
-  gfx.alpha *= 0.985;
-  gfx.anim = (gfx.alpha > 0.02 || gfx.drag) ? requestAnimationFrame(step) : null;
-}
-
-function drawGraph() {
-  var svg = $("graphSvg");
-  if (!gfx.nodes.length) {
-    svg.innerHTML =
-      '<text x="50%" y="50%" text-anchor="middle" fill="#5d6b80" ' +
-      'font-family="ui-monospace,monospace" font-size="12">' +
-      "Awaiting telemetry — ingest a log or run the attack sequence.</text>";
+  var width = wrap.clientWidth;
+  var height = wrap.clientHeight;
+  if (width < 40 || height < 40) return;
+  var size = width + "x" + height;
+  if (size === graphSize) {
+    if (restart && state.nodes.length) simulation.alpha(0.7).restart();
     return;
   }
-
-  var parts = [];
-  gfx.edges.forEach(function (e) {
-    parts.push('<line class="gedge' + (e.high ? " high" : "") + '" x1="' +
-      e.s.x.toFixed(1) + '" y1="' + e.s.y.toFixed(1) + '" x2="' +
-      e.t.x.toFixed(1) + '" y2="' + e.t.y.toFixed(1) + '"/>');
-  });
-
-  gfx.nodes.forEach(function (n) {
-    var st = stageOf(n.stage);
-    var sel = n.data.leafHash === state.activeLeaf;
-    parts.push(
-      '<g class="gnode' + (sel ? " sel" : "") + '" data-id="' + esc(n.id) +
-      '" transform="translate(' + n.x.toFixed(1) + "," + n.y.toFixed(1) + ')">' +
-        (sel ? '<circle class="ring" r="13"/>' : "") +
-        '<circle class="body" r="8" fill="' + st.c + '"/>' +
-        '<text x="13" y="4">' + esc(n.data.mitreId) + "</text>" +
-      "</g>"
-    );
-  });
-
-  svg.innerHTML = parts.join("");
-  Array.prototype.forEach.call(svg.querySelectorAll(".gnode"), function (gn) {
-    gn.addEventListener("click", function (e) {
-      if (gfx.moved) return;
-      var node = gfx.nodes.filter(function (candidate) {
-        return candidate.id === gn.dataset.id;
-      })[0];
-      if (node) selectLeaf(node.data.leafHash);
-      e.stopPropagation();
-    });
-  });
+  graphSize = size;
+  var innerW = Math.max(80, width - PAD * 2);
+  var innerH = Math.max(80, height - PAD * 2);
+  graphWidth = innerW;
+  graphHeight = innerH;
+  graphSvg.attr("width", width).attr("height", height)
+      .attr("viewBox", "0 0 " + width + " " + height);
+  d3Graph.attr("transform", "translate(" + PAD + "," + PAD + ")");
+  simulation.force("center", d3.forceCenter(innerW / 2, innerH / 2));
+  simulation.force("x", d3.forceX(innerW / 2).strength(0.08));
+  simulation.force("y", d3.forceY(innerH / 2).strength(0.08));
+  if (restart && state.nodes.length) simulation.alpha(0.7).restart();
 }
 
 function renderNodeDetail(n) {
@@ -1119,7 +1232,6 @@ function resetSession() {
     return post("/api/reset").then(function () {
       state.activeLeaf = "";
       state.nodes = []; state.edges = []; state.batches = [];
-      gfx.nodes = []; gfx.edges = [];
       $("leafInput").value = "";
       $("lastEventBody").innerHTML = '<p class="empty">No event submitted yet.</p>';
       $("auditResult").innerHTML = '<p class="empty">No audit run yet.</p>';
@@ -1147,32 +1259,108 @@ function refreshAll() {
    Wiring
    ============================================================ */
 document.addEventListener("click", function (ev) {
-  var t = ev.target;
+   var t = ev.target;
 
-  var tab = t.closest(".tab");
-  if (tab) { showView(tab.dataset.view); return; }
+   var tab = t.closest(".tab");
+   if (tab) { showView(tab.dataset.view); return; }
 
-  var chip = t.closest(".chip[data-i]");
-  if (chip) {
-    $("logInput").value = SAMPLES[+chip.dataset.i].text;
-    $("logInput").focus();
-    return;
+   var chip = t.closest(".chip[data-i]");
+   if (chip) {
+     $("logInput").value = SAMPLES[+chip.dataset.i].text;
+     $("logInput").focus();
+     return;
+   }
+
+   var cp = t.closest("[data-copy]");
+   if (cp) { copy(cp.dataset.copy, "Leaf hash"); return; }
+
+   var au = t.closest("[data-audit]");
+   if (au) { selectLeaf(au.dataset.audit, { goto: "integrity" }); return; }
+
+   var row = t.closest("tr[data-leaf]");
+   if (row) { selectLeaf(row.dataset.leaf); return; }
+
+   var gn = t.closest(".gnode");
+   if (gn) {
+     // D3 handles node clicks via .on("click"); skip manual handler
+     return;
+   }
+ });
+
+/* File upload wiring */
+var fileInput = $("fileInput");
+var importPoll = null;
+var importSessionId = "";
+
+function finishImportUi() {
+  if (importPoll) {
+    clearInterval(importPoll);
+    importPoll = null;
   }
+  $("btnImport").disabled = false;
+  $("btnCancelImport").disabled = false;
+  $("btnCancelImport").style.display = "none";
+}
 
-  var cp = t.closest("[data-copy]");
-  if (cp) { copy(cp.dataset.copy, "Leaf hash"); return; }
+function cancelImport() {
+  if (!importSessionId) return;
+  $("btnCancelImport").disabled = true;
+  get("/api/import/cancel?sessionId=" + encodeURIComponent(importSessionId)).then(function () {
+    $("progressStatus").textContent = "Cancelling...";
+  }).catch(fail);
+}
 
-  var au = t.closest("[data-audit]");
-  if (au) { selectLeaf(au.dataset.audit, { goto: "integrity" }); return; }
+$("btnCancelImport").addEventListener("click", cancelImport);
+$("btnFileUpload").addEventListener("click", function () { fileInput.click(); });
+fileInput.addEventListener("change", function () {
+  var f = fileInput.files[0];
+  $("fileName").textContent = f ? f.name : "-";
+});
 
-  var row = t.closest("tr[data-leaf]");
-  if (row) { selectLeaf(row.dataset.leaf); return; }
+$("btnImport").addEventListener("click", function () {
+  var file = fileInput.files[0];
+  if (!file) { toast("Choose a file first", "warn"); return; }
 
-  var gn = t.closest(".gnode");
-  if (gn && !gfx.moved) {
-    var node = gfx.nodes.filter(function (n) { return n.id === gn.dataset.id; })[0];
-    if (node) selectLeaf(node.data.leafHash);
-  }
+  var reader = new FileReader();
+  reader.onload = function (e) {
+    var content = e.target.result;
+    if (!content.trim()) { toast("File is empty", "warn"); return; }
+
+    var progress = $("importProgress");
+    progress.style.display = "block";
+    $("btnImport").disabled = true;
+    $("btnCancelImport").disabled = false;
+    $("btnCancelImport").style.display = "inline-flex";
+    $("progressBar").style.width = "10%";
+    $("progressStatus").textContent = "Uploading...";
+    $("progressDetails").textContent = "";
+
+    post("/api/import", content).then(function (d) {
+      importSessionId = d.sessionId;
+      $("progressBar").style.width = "50%";
+      $("progressStatus").textContent = "Importing...";
+
+      importPoll = setInterval(function () {
+        get("/api/import/status?sessionId=" + encodeURIComponent(importSessionId)).then(function (sd) {
+          var pct = sd.totalLines ? Math.round(sd.processedLines / sd.totalLines * 100) : 0;
+          $("progressBar").style.width = pct + "%";
+          $("progressStatus").textContent = sd.status;
+          $("progressDetails").textContent = sd.processedLines + "/" + sd.totalLines + " lines";
+
+          if (sd.status === "COMPLETED" || sd.status === "FAILED" || sd.status === "CANCELLED") {
+            finishImportUi();
+            $("progressBar").style.width = sd.status === "COMPLETED" ? "100%" : $("progressBar").style.width;
+            toast(sd.status + " - " + sd.processedLines + " lines, " + sd.ingestedEvents + " events", sd.status === "CANCELLED" ? "warn" : "ok");
+            refreshAll();
+          }
+        }).catch(fail);
+      }, 500);
+    }).catch(function (err) {
+      finishImportUi();
+      fail(err);
+    });
+  };
+  reader.readAsText(file);
 });
 
 $("btnIngest").addEventListener("click", ingest);
@@ -1186,7 +1374,7 @@ $("btnMlDownload").addEventListener("click", function () { mlExport(true); });
 $("btnEvPreview").addEventListener("click", function () { evidenceExport(false); });
 $("btnEvDownload").addEventListener("click", function () { evidenceExport(true); });
 $("btnReset").addEventListener("click", resetSession);
-$("btnGraphRefresh").addEventListener("click", function () { loadGraph(); });
+$("btnGraphRefresh").addEventListener("click", function () { loadGraph(true); });
 $("btnLedgerRefresh").addEventListener("click", loadLedger);
 $("btnCopyTip").addEventListener("click", function () {
   copy(state.status && state.status.chainTip, "Chain tip");
@@ -1197,40 +1385,17 @@ $("logInput").addEventListener("keydown", function (e) {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); ingest(); }
 });
 
-/* Node dragging in the provenance graph. */
+/* Node selection in the provenance graph. */
 (function () {
   var svg = $("graphSvg");
-  var dragStart = null;
   svg.addEventListener("mousedown", function (e) {
-    var gn = e.target.closest(".gnode");
-    if (!gn) return;
-    var node = gfx.nodes.filter(function (n) { return n.id === gn.dataset.id; })[0];
-    if (!node) return;
-    gfx.drag = node; gfx.moved = false; dragStart = { x: e.clientX, y: e.clientY }; node.fixed = true;
+    if (!e.target.closest(".gnode")) return;
     e.preventDefault();
-  });
-  window.addEventListener("mousemove", function (e) {
-    if (!gfx.drag) return;
-    if (dragStart && Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y) > 4) {
-      gfx.moved = true;
-    }
-    var r = svg.getBoundingClientRect();
-    gfx.drag.x = Math.max(PAD, Math.min(gfx.w - PAD, e.clientX - r.left));
-    gfx.drag.y = Math.max(PAD, Math.min(gfx.h - PAD, e.clientY - r.top));
-    gfx.alpha = Math.max(gfx.alpha, 0.35);
-    if (!gfx.anim) gfx.anim = requestAnimationFrame(step);
-  });
-  window.addEventListener("mouseup", function () {
-    if (!gfx.drag) return;
-    gfx.drag.fixed = false;
-    gfx.drag = null;
-    dragStart = null;
-    setTimeout(function () { gfx.moved = false; }, 0);
   });
 })();
 
 window.addEventListener("resize", function () {
-  if (state.view === "provenance") relayout();
+  if (state.view === "provenance") resizeD3Graph();
 });
 
 /* Boot */

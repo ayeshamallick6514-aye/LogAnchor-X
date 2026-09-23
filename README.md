@@ -19,7 +19,7 @@ It addresses two fundamental challenges in modern SecOps and cyber forensics:
 
 ```
                                   [ MULTI-SOURCE INGESTION ]
-                     (Syslog RFC 3164/5424, CEF, LEEF, JSON, Apache, Custom)
+           (Syslog RFC 3164/5424, CEF, LEEF, JSON, Apache, HDFS, Custom)
                                              │
                                              ▼
                              ┌───────────────────────────────┐
@@ -60,6 +60,7 @@ It addresses two fundamental challenges in modern SecOps and cyber forensics:
 | Feature | Description | Technical Advantage |
 |---|---|---|
 | **Zero-Regex Auto Parsing** | Fixed-depth Drain Trie clustering extracts templates dynamically from raw text streams. | Eliminates manual Grok/Regex scripting; 30,000+ EPS/core on standard CPUs. |
+| **HDFS_v1 Native Support** | Hadoop Distributed File System log parsing with block ID tracking, component extraction, and MITRE threat mapping. | **NEW**: 6 HDFS-specific ATT&CK rules for block lifecycle anomaly detection. |
 | **Lossless Dual-Payload** | Normalizes events to **OCSF standard** while preserving byte-for-byte raw logs. | Guarantees legal admissibility (NIST SP 800-86) without losing vendor-specific attributes. |
 | **Cryptographic WAL Ledger** | Append-only ledger file (`cyberguard_ledger.dat`) backed by SHA-256 Merkle root chaining. | No SQL/NoSQL engine required; eliminates insider `UPDATE`/`DELETE` tampering risks. |
 | **1-Click Tamper Simulation** | Instantly simulates bit-level ledger alteration and verifies Merkle root divergence. | Live visual proof of cryptographic discrepancy (`CRITICAL: TAMPER DETECTED`). |
@@ -121,27 +122,23 @@ The embedded microserver exposes the following endpoints on `http://localhost:80
 
 ### Prerequisites
 - Java Development Kit (JDK 17 or higher)
+- Maven 3.6+
 - Git
 
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/ayeshamallick6514-aye/LogParserProtoType.git
 cd LogParserProtoType
-git checkout integration
 ```
 
-### 2. Compile
+### 2. Build with Maven
 ```bash
-# Compile Java source into target directory
-javac -encoding UTF-8 -d target/classes src/main/java/org/example/Main.java
-
-# Copy frontend assets to classpath
-copy src\main\resources\index.html target\classes\index.html
+mvn clean package
 ```
 
 ### 3. Run the Engine
 ```bash
-java -cp target/classes org.example.Main
+java -jar target/log-parser-prototype-1.0-SNAPSHOT.jar
 ```
 
 ### 4. Access the Dashboard
@@ -149,6 +146,21 @@ Open your browser and navigate to:
 ```
 http://localhost:8080
 ```
+
+### 5. **NEW: HDFS Quick Demo**
+```bash
+# In the web UI:
+1. Click "HDFS block alloc" sample chip
+2. Click "Ingest" button
+3. Verify Format: HDFS_v1, Service: HDFS, Tactic: Discovery
+4. Switch to "Provenance" tab → See graph visualization
+5. Switch to "Integrity" tab → Copy leaf hash → "Verify proof"
+```
+
+**Full HDFS Documentation:**
+- `HDFS_INTEGRATION_GUIDE.md` - Comprehensive 300+ line guide
+- `HDFS_FEATURES.md` - Technical deep-dive with examples
+- `QUICK_START.md` - 30-second demo script
 
 ---
 
