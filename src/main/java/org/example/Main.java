@@ -53,6 +53,20 @@ public class Main {
         boolean isSealed;
     }
 
+    static class ImportProgress {
+        String sessionId;
+        String fileName;
+        String status; // RUNNING, COMPLETED, FAILED
+        long totalLines;
+        long processedLines;
+        long ingestedEvents;
+        long sealedBatches;
+        long errorCount;
+        long startTime;
+        String errorMessage;
+        volatile boolean cancelRequested;
+    }
+
     static class MerkleProof {
         String leafHash;
         String batchId;
@@ -71,12 +85,20 @@ public class Main {
         private static final Pattern HEX = Pattern.compile("0x[0-9a-fA-F]+");
         private static final Pattern NUMBER = Pattern.compile("(?<=\\s|=|^)\\d+(?=\\s|$|,|;|\\.)");
         private static final Pattern PORT = Pattern.compile("(?:dpt|port|dstport)=(\\d+)");
+        private static final Pattern HDFS_BLOCK = Pattern.compile("blk_-?\\d+");
+        private static final Pattern HDFS_COMPONENT = Pattern.compile("dfs\\.(?:FSNamesystem|DataNode|NameNode|SecondaryNameNode|JournalNode|ClientProtocol|Namenode|Datanode)");
+        private static final Pattern HDFS_BLOCK_ALLOC = Pattern.compile("allocate\\s+blk_-?\\d+");
+        private static final Pattern HDFS_BLOCK_RECEIVE = Pattern.compile("Received\\s+blk_-?\\d+");
+        private static final Pattern HDFS_BLOCK_DELETE = Pattern.compile("delete\\s+blk_-?\\d+");
+        private static final Pattern HDFS_BLOCK_REPLICATE = Pattern.compile("replicate\\s+blk_-?\\d+");
 
         static String mask(String raw) {
             String s = IP.matcher(raw).replaceAll("<IP>");
             s = UUID_PAT.matcher(s).replaceAll("<UUID>");
             s = HEX.matcher(s).replaceAll("<HEX>");
             s = NUMBER.matcher(s).replaceAll("<N>");
+            s = HDFS_BLOCK.matcher(s).replaceAll("<BLOCK_ID>");
+            s = HDFS_COMPONENT.matcher(s).replaceAll("<HDFS_COMPONENT>");
             return s;
         }
 
@@ -97,6 +119,9 @@ public class Main {
             if (l.contains("firewall") || l.contains("fw") || l.contains("proto=tcp")) return "FIREWALL";
             if (l.contains("proxy") || l.contains("http") || l.contains("nginx")) return "PROXY";
             if (l.contains("select") || l.contains("db") || l.contains("mysqld") || l.contains("postgres")) return "DATABASE";
+            if (l.contains("dfs.fsnamesystem") || l.contains("dfs.datanode") || l.contains("dfs.namenode") ||
+                l.contains("dfs.secondarynamenode") || l.contains("dfs.journalnode") ||
+                l.contains("packetresponder") || l.contains("dataxceiver") || l.contains("namesystem")) return "HDFS";
             return "SYSTEM";
         }
     }
@@ -207,20 +232,28 @@ public class Main {
             }
         }
 
-        static final List<Rule> RULES = List.of(
+static final List<Rule> RULES = List.of(
                 new Rule("port_scan|flags=syn|nmap|dpt=22", "TA0043", "Reconnaissance", "T1046", "Network Service Discovery", 1),
                 new Rule("failed password|invalid user|authentication failure", "TA0006", "Credential Access", "T1110", "Brute Force", 3),
                 new Rule("sudo:.*root.*bash|privilege|user=root", "TA0004", "Privilege Escalation", "T1078", "Valid Accounts", 4),
                 new Rule("data_exfil|large_transfer|bytes=\\d{7,}|exfil", "TA0010", "Exfiltration", "T1041", "Exfiltration Over C2", 6),
                 new Rule("exploit|remote code|rce", "TA0001", "Initial Access", "T1190", "Exploit Public-Facing App", 2),
-                new Rule("powershell|cmd.exe|/bin/sh", "TA0002", "Execution", "T1059", "Command and Scripting Interpreter", 3),
+                new Rule("powershell|cmd\\.exe|/bin/sh", "TA0002", "Execution", "T1059", "Command and Scripting Interpreter", 3),
                 new Rule("cron|scheduled|registry", "TA0003", "Persistence", "T1053", "Scheduled Task/Job", 4),
                 new Rule("clear log|wevtutil|disable fw", "TA0005", "Defense Evasion", "T1070", "Indicator Removal", 5),
                 new Rule("net view|arp -a|whoami", "TA0007", "Discovery", "T1087", "Account Discovery", 2),
                 new Rule("psexec|wmic|ssh.*admin", "TA0008", "Lateral Movement", "T1021", "Remote Services", 5),
                 new Rule("dump|archive|tar -czf", "TA0009", "Collection", "T1560", "Archive Collected Data", 5),
                 new Rule("beacon|c2|reverse_shell", "TA0011", "Command and Control", "T1071", "Application Layer Protocol", 6),
-                new Rule("ransom|encrypt|wipe|drop database", "TA0040", "Impact", "T1486", "Data Encrypted for Impact", 7)
+                new Rule("ransom|encrypt|wipe|drop database", "TA0040", "Impact", "T1486", "Data Encrypted for Impact", 7),
+                new Rule("blk_-?\\d+.*allocate|allocate.*blk_-?\\d+", "TA0007", "Discovery", "T1083", "File and Directory Discovery", 1),
+                new Rule("blk_-?\\d+.*delete|delete.*blk_-?\\d+", "TA0040", "Impact", "T1485", "Data Destruction", 7),
+                new Rule("blk_-?\\d+.*replicate|replicate.*blk_-?\\d+", "TA0009", "Collection", "T1560", "Archive Collected Data", 5),
+                new Rule("Received.*blk_-?\\d+|received.*blk_-?\\d+", "TA0007", "Discovery", "T1083", "File and Directory Discovery", 1),
+                new Rule("dfs\\.FSNamesystem.*WARN|dfs\\.FSNamesystem.*ERROR", "TA0005", "Defense Evasion", "T1070", "Indicator Removal", 5),
+                new Rule("dfs\\.DataNode.*WARN|dfs\\.DataNode.*ERROR", "TA0005", "Defense Evasion", "T1070", "Indicator Removal", 5),
+                new Rule("block.*corrupt|corrupt.*block|missing.*block", "TA0040", "Impact", "T1485", "Data Destruction", 7),
+                new Rule("unauthorized|access denied|permission denied", "TA0006", "Credential Access", "T1069", "Permission Groups Discovery", 3)
         );
 
         static String[] classify(String text) {
@@ -325,7 +358,9 @@ public class Main {
         final Map<String, LogEvent> eventsByLeaf = new ConcurrentHashMap<>();
         final List<Batch> sealedBatches = new CopyOnWriteArrayList<>();
         final List<LogEvent> currentBatchLeaves = new CopyOnWriteArrayList<>();
+        final IncrementalMerkleTree currentTree = new IncrementalMerkleTree();
         final File ledgerFile = new File("cyberguard_ledger.dat");
+        final Map<String, ImportProgress> importSessions = new ConcurrentHashMap<>();
 
         final AtomicInteger eventCounter = new AtomicInteger(0);
         final AtomicInteger batchCounter = new AtomicInteger(0);
@@ -372,6 +407,7 @@ public class Main {
 
             synchronized (currentBatchLeaves) {
                 currentBatchLeaves.add(ev);
+                currentTree.addLeaf(ev.leafHash);
                 if (currentBatchLeaves.size() >= BATCH_CAPACITY) {
                     sealBatch();
                 }
@@ -382,9 +418,16 @@ public class Main {
         String detectFormat(String raw) {
             if (raw.startsWith("CEF:")) return "CEF";
             if (raw.startsWith("LEEF:")) return "LEEF";
-            if (raw.startsWith("{") && raw.endsWith("}")) return "JSON";
+            if (raw.startsWith("{") && raw.endsWith("}")) {
+                if (raw.contains("\"category_uid\"") || raw.contains("\"class_uid\"") || raw.contains("\"event_uid\"")) {
+                    return "OCSF";
+                }
+                return "JSON";
+            }
             if (raw.startsWith("<") && raw.endsWith(">")) return "XML";
             if (raw.matches("^[a-zA-Z]{3}\\s+\\d+.*")) return "SYSLOG";
+            if (raw.matches("^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2},\\d{3}\\s+(INFO|WARN|ERROR|DEBUG|TRACE)\\s+dfs\\..*")) return "HDFS_v1";
+            if (raw.matches("^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2},\\d{3}.*")) return "HDFS_v1";
             return "CSV";
         }
 
@@ -399,14 +442,14 @@ public class Main {
                 b.leafHashes.add(e.leafHash);
             }
 
-            b.merkleRoot = MerkleEngine.buildRoot(b.leafHashes);
+            b.merkleRoot = currentTree.getRootHash();
             b.chainedRoot = MerkleEngine.sha256(lastChainedRoot + "|" + b.merkleRoot);
             lastChainedRoot = b.chainedRoot;
             b.isSealed = true;
 
             sealedBatches.add(b);
             currentBatchLeaves.clear();
-
+            currentTree.clear();
             appendWal(b);
             return b;
         }
@@ -433,6 +476,7 @@ public class Main {
             lastBenchCount.set(0);
             lastChainedRoot = MerkleEngine.sha256("GENESIS_BLOCK_CYBERGUARD");
             simRunning.set(false);
+            currentTree.clear();
             try {
                 java.nio.file.Files.deleteIfExists(ledgerFile.toPath());
             } catch (IOException e) {
@@ -596,7 +640,7 @@ public class Main {
     // ============================================================
     // HTTP Server & Controllers
     // ============================================================
-    public static void main(String[] args) throws IOException {
+public static void main(String[] args) throws IOException {
         Engine engine = new Engine();
         int port = 8080;
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -614,6 +658,15 @@ public class Main {
         server.createContext("/api/ml-export", new MlExportHandler(engine));
         server.createContext("/api/evidence-bundle", new EvidenceBundleHandler(engine));
         server.createContext("/api/reset", new ResetHandler(engine));
+        server.createContext("/api/import", new ImportHandler(engine));
+        server.createContext("/api/import/status", new ImportStatusHandler(engine));
+        server.createContext("/api/import/cancel", new ImportCancelHandler(engine));
+
+        // CLI import flag
+        if (args.length >= 2 && "--import".equals(args[0])) {
+            BatchImporter.importFromCli(java.util.Arrays.copyOfRange(args, 1, args.length));
+            return; // exit after import (server already shut down)
+        }
 
         int poolSize = Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
         server.setExecutor(Executors.newFixedThreadPool(poolSize));
@@ -640,21 +693,43 @@ public class Main {
         return new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
     }
 
+    static void serveResource(HttpExchange ex, String path) throws IOException {
+        try (InputStream is = Main.class.getResourceAsStream(path)) {
+            if (is == null) {
+                String msg = "Resource not found: " + path;
+                byte[] err = msg.getBytes(StandardCharsets.UTF_8);
+                ex.sendResponseHeaders(404, err.length);
+                ex.getResponseBody().write(err);
+                return;
+            }
+            byte[] data = is.readAllBytes();
+            String mimeType = "text/plain";
+            if (path.endsWith(".js")) {
+                mimeType = "application/javascript";
+            } else if (path.endsWith(".css")) {
+                mimeType = "text/css";
+            } else if (path.endsWith(".html")) {
+                mimeType = "text/html; charset=UTF-8";
+            }
+            ex.getResponseHeaders().set("Content-Type", mimeType);
+            ex.sendResponseHeaders(200, data.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(data); }
+        }
+    }
+
     // Static Resource
     static class StaticHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
-            try (InputStream is = getClass().getResourceAsStream("/index.html")) {
-                if (is == null) {
-                    byte[] err = "<html><body><h1>index.html not found</h1></body></html>".getBytes(StandardCharsets.UTF_8);
-                    ex.sendResponseHeaders(404, err.length);
-                    ex.getResponseBody().write(err);
-                    return;
-                }
-                byte[] html = is.readAllBytes();
-                ex.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
-                ex.sendResponseHeaders(200, html.length);
-                try (OutputStream os = ex.getResponseBody()) { os.write(html); }
+            String path = ex.getRequestURI().getPath();
+            if ("/".equals(path)) {
+                serveResource(ex, "/index.html");
+            } else if (path.startsWith("/js/")) {
+                serveResource(ex, path);
+            } else {
+                byte[] err = "Not found".getBytes(StandardCharsets.UTF_8);
+                ex.sendResponseHeaders(404, err.length);
+                ex.getResponseBody().write(err);
             }
         }
     }
@@ -681,6 +756,122 @@ public class Main {
                     "{\"id\":\"%s\",\"leafHash\":\"%s\",\"format\":\"%s\",\"templateId\":\"%s\",\"template\":\"%s\",\"mitreTactic\":\"%s\",\"mitreTechnique\":\"%s\"}",
                     ev.id, ev.leafHash, ev.format, ev.templateId, escape(ev.template), ev.mitreTacticName, ev.mitreTechniqueName
             ));
+        }
+    }
+
+    // Import Handler - File Upload Endpoint
+    static class ImportHandler implements HttpHandler {
+        final Engine engine;
+        ImportHandler(Engine e) { this.engine = e; }
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendJson(ex, 405, "{\"status\":\"error\",\"message\":\"POST required\"}");
+                return;
+            }
+            
+            String fileName = ex.getRequestHeaders().getFirst("X-File-Name");
+            if (fileName == null) fileName = "imported.log";
+            
+            String sessionId = "IMP-" + System.currentTimeMillis();
+            ImportProgress progress = new ImportProgress();
+            progress.sessionId = sessionId;
+            progress.fileName = fileName;
+            progress.status = "RUNNING";
+            progress.startTime = System.currentTimeMillis();
+            progress.totalLines = 0;
+            engine.importSessions.put(sessionId, progress);
+            
+            String content = readBody(ex);
+            String[] lines = content.split("\n");
+            progress.totalLines = lines.length;
+            
+            CompletableFuture.runAsync(() -> {
+                long ingested = 0;
+                long errors = 0;
+                for (String line : lines) {
+                    if (progress.cancelRequested) {
+                        progress.status = "CANCELLED";
+                        break;
+                    }
+                    line = line.trim();
+                    if (line.isEmpty()) {
+                        progress.processedLines++;
+                        continue;
+                    }
+                    try {
+                        engine.ingest(line);
+                        ingested++;
+                    } catch (Exception e) {
+                        errors++;
+                    }
+                    progress.processedLines++;
+                    progress.ingestedEvents = ingested;
+                    progress.errorCount = errors;
+                    progress.sealedBatches = engine.sealedBatches.size();
+                }
+                if (!"CANCELLED".equals(progress.status)) progress.status = "COMPLETED";
+            });
+
+            sendJson(ex, 202, String.format(
+                "{\"status\":\"ACCEPTED\",\"sessionId\":\"%s\"}", sessionId
+            ));
+        }
+    }
+
+    // Import Status Handler
+    static class ImportStatusHandler implements HttpHandler {
+        final Engine engine;
+        ImportStatusHandler(Engine e) { this.engine = e; }
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            String query = ex.getRequestURI().getQuery();
+            String sessionId = "";
+            if (query != null && query.contains("sessionId=")) {
+                sessionId = query.split("sessionId=")[1].split("&")[0];
+            }
+            
+            ImportProgress progress = engine.importSessions.get(sessionId);
+            if (progress == null) {
+                sendJson(ex, 404, "{\"status\":\"error\",\"message\":\"Session not found\"}");
+                return;
+            }
+            
+            sendJson(ex, 200, toJson(Map.of(
+                "sessionId", progress.sessionId,
+                "fileName", progress.fileName,
+                "status", progress.status,
+                "totalLines", progress.totalLines,
+                "processedLines", progress.processedLines,
+                "ingestedEvents", progress.ingestedEvents,
+                "sealedBatches", progress.sealedBatches,
+                "errorCount", progress.errorCount,
+                "startTime", progress.startTime
+            )));
+        }
+    }
+
+    static class ImportCancelHandler implements HttpHandler {
+        final Engine engine;
+        ImportCancelHandler(Engine e) { this.engine = e; }
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            String query = ex.getRequestURI().getQuery();
+            String sessionId = "";
+            if (query != null && query.contains("sessionId=")) {
+                sessionId = query.split("sessionId=")[1].split("&")[0];
+            }
+            ImportProgress progress = engine.importSessions.get(sessionId);
+            if (progress == null) {
+                sendJson(ex, 404, "{\"status\":\"error\",\"message\":\"Session not found\"}");
+                return;
+            }
+            if ("RUNNING".equals(progress.status)) {
+                progress.cancelRequested = true;
+                sendJson(ex, 200, "{\"status\":\"CANCEL_REQUESTED\"}");
+            } else {
+                sendJson(ex, 200, String.format("{\"status\":\"%s\"}", progress.status));
+            }
         }
     }
 
@@ -921,9 +1112,17 @@ public class Main {
             int integrityAudits = engine.simulatedTamperCount.get();
             int threatScore = engine.calculateKillChainRiskScore();
 
+            // Count unique formats from events
+            Set<String> uniqueFormats = new HashSet<>();
+            for (LogEvent ev : engine.eventsById.values()) {
+                uniqueFormats.add(ev.format);
+            }
+            int uniqueFormatCount = uniqueFormats.size();
+            int adapterCount = uniqueFormatCount; // Each format is an adapter
+
             sendJson(ex, 200, String.format(
-                    "{\"ingested\":%d,\"totalIngested\":%d,\"sealedBatches\":%d,\"batchesAnchored\":%d,\"adaptersActive\":6,\"uniqueFormatsCount\":6,\"detections\":%d,\"validations\":%d,\"integrityChecksPassed\":%d,\"threatScore\":%d,\"lastChainedRoot\":\"%s\",\"chainTip\":\"%s\",\"benchEps\":%d,\"simRunning\":%b}",
-                    ingested, ingested, sealed, sealed, detections, integrityAudits, integrityAudits, threatScore, engine.lastChainedRoot, engine.lastChainedRoot, engine.lastBenchEps.get(), engine.simRunning.get()
+                    "{\"ingested\":%d,\"totalIngested\":%d,\"sealedBatches\":%d,\"batchesAnchored\":%d,\"adaptersActive\":%d,\"uniqueFormatsCount\":%d,\"detections\":%d,\"validations\":%d,\"integrityChecksPassed\":%d,\"threatScore\":%d,\"lastChainedRoot\":\"%s\",\"chainTip\":\"%s\",\"benchEps\":%d,\"simRunning\":%b}",
+                    ingested, ingested, sealed, sealed, adapterCount, uniqueFormatCount, detections, integrityAudits, integrityAudits, threatScore, engine.lastChainedRoot, engine.lastChainedRoot, engine.lastBenchEps.get(), engine.simRunning.get()
             ));
         }
     }
@@ -987,6 +1186,130 @@ public class Main {
             if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { sendJson(ex, 405, "{}"); return; }
             engine.resetState();
             sendJson(ex, 200, "{\"status\":\"RESET_COMPLETE\"}");
+        }
+    }
+
+    // Batch Importer - CLI file import utility
+    static class BatchImporter {
+        final Engine engine;
+        BatchImporter(Engine e) { this.engine = e; }
+
+        static class ImportResult {
+            long totalLines;
+            long ingestedEvents;
+            long errorCount;
+            long sealedBatches;
+            long elapsedMs;
+            String message;
+        }
+
+        ImportResult importFile(File file, String expectedFormat, boolean autoSeal) {
+            long start = System.currentTimeMillis();
+            ImportResult result = new ImportResult();
+            long ingested = 0;
+            long errors = 0;
+            long totalLines = 0;
+
+            String sessionId = "IMP-" + System.currentTimeMillis();
+            ImportProgress progress = new ImportProgress();
+            progress.sessionId = sessionId;
+            progress.fileName = file.getName();
+            progress.status = "RUNNING";
+            progress.startTime = start;
+            engine.importSessions.put(sessionId, progress);
+
+            try (BufferedReader reader = new BufferedReader(new java.io.FileReader(file))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    totalLines++;
+                    progress.totalLines = totalLines;
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+
+                    try {
+                        LogEvent ev = engine.ingest(line);
+                        ingested++;
+                        if (expectedFormat != null && !expectedFormat.equals(ev.format)) {
+                            System.out.println("  Line " + totalLines + ": detected " + ev.format + " (expected " + expectedFormat + ")");
+                        }
+                    } catch (Exception e) {
+                        errors++;
+                        if (errors <= 10) {
+                            System.err.println("  Line " + totalLines + ": ERROR - " + e.getMessage());
+                        }
+                    }
+
+                    progress.processedLines = totalLines;
+                    progress.ingestedEvents = ingested;
+                    progress.errorCount = errors;
+                    progress.sealedBatches = engine.sealedBatches.size();
+                }
+            } catch (IOException e) {
+                progress.status = "FAILED";
+                progress.errorMessage = e.getMessage();
+                result.errorCount = errors;
+                result.ingestedEvents = ingested;
+                result.totalLines = totalLines;
+                result.message = "Failed: " + e.getMessage();
+                return result;
+            }
+
+            if (autoSeal && !engine.currentBatchLeaves.isEmpty()) {
+                engine.sealBatch();
+            }
+
+            progress.status = "COMPLETED";
+            progress.sealedBatches = engine.sealedBatches.size();
+            engine.importSessions.put(sessionId, progress);
+
+            result.totalLines = totalLines;
+            result.ingestedEvents = ingested;
+            result.errorCount = errors;
+            result.sealedBatches = engine.sealedBatches.size();
+            result.elapsedMs = System.currentTimeMillis() - start;
+            result.message = "OK";
+            return result;
+        }
+
+        static void importFromCli(String[] args) {
+            // args[0] is "--import", skip it
+            if (args.length < 2) {
+                System.err.println("Usage: java -jar logparser.jar --import <file> [format]");
+                System.err.println("  Formats: CEF, LEEF, JSON, XML, SYSLOG, CSV, or auto");
+                System.exit(1);
+            }
+
+            File file = new File(args[1]);
+            if (!file.exists() || !file.isFile()) {
+                System.err.println("File not found: " + file.getAbsolutePath());
+                System.exit(1);
+            }
+
+            String format = args.length >= 3 ? args[2] : "auto";
+            Engine engine = new Engine();
+
+            System.out.println("==================================================================");
+            System.out.println("  BatchImporter CLI");
+            System.out.println("  File:    " + file.getAbsolutePath());
+            System.out.println("  Format:  " + format);
+            System.out.println("  Size:    " + file.length() + " bytes");
+            System.out.println("==================================================================");
+
+            ImportResult result = new BatchImporter(engine).importFile(file,
+                    "auto".equals(format) ? null : format, true);
+
+            System.out.println("\n--- Import Summary ---");
+            System.out.println("  Total lines:     " + result.totalLines);
+            System.out.println("  Events ingested: " + result.ingestedEvents);
+            System.out.println("  Errors:          " + result.errorCount);
+            System.out.println("  Batches sealed:  " + result.sealedBatches);
+            System.out.println("  Elapsed:         " + result.elapsedMs + " ms");
+            System.out.println("  Result:          " + result.message);
+            if (result.errorCount > 0 && result.errorCount < result.totalLines) {
+                System.out.println("  (Some lines may have been blank or malformed)");
+            }
+            System.out.println("==================================================================");
+            engine.resetState();
         }
     }
 
