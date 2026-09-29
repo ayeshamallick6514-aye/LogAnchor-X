@@ -37,3 +37,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+HDFS_v1/HDFS.log
+HDFS_v1/preprocessed/Event_traces.csv
+HDFS_v1/preprocessed/*.npz
+HDFS_v1/preprocessed/*.csv
